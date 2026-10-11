@@ -1,0 +1,33 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build app bundle
+        run: ./bundle.sh
+
+      - name: Create release zip
+        run: ditto -c -k --keepParent "Swami 5000 Tool.app" "Swami-5000-Tool.zip"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Swami-5000-Tool
+          path: Swami-5000-Tool.zip
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" Swami-5000-Tool.zip --title "${{ github.ref_name }}" --generate-notes

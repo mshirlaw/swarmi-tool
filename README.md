@@ -40,6 +40,14 @@ The app is not signed with an Apple Developer ID or notarized, so Gatekeeper blo
 
 To remove the warning entirely, sign and notarize with an Apple Developer account ($99/year).
 
+## Releases
+
+Pushing a tag like `v1.0.0` runs the GitHub Action in `.github/workflows/release.yml`, which builds the app, zips it as `Swami-5000-Tool.zip` and attaches it to a GitHub release. The workflow can also be run manually from the Actions tab; the zip is then available as a build artifact.
+
+```sh
+git tag v1.0.0 && git push origin v1.0.0
+```
+
 ## Layout
 
 | Path | Purpose |
@@ -47,5 +55,6 @@ To remove the warning entirely, sign and notarize with an Apple Developer accoun
 | `Sources/SwamiTool/SwamiToolApp.swift` | The whole app (model, download logic, UI) |
 | `Package.swift` | Swift Package Manager manifest |
 | `bundle.sh` | Builds the `.app` bundle |
+| `.github/workflows/release.yml` | Builds and publishes the release zip |
 | `Icon/make_icon.swift` | Draws the app icon in code |
 | `Icon/build_icns.sh` | Regenerates `Icon/AppIcon.icns` |

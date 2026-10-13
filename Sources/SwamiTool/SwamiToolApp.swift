@@ -5,6 +5,9 @@
 // A failed download leaves no partial file behind.
 
 import SwiftUI
+import os
+
+let log = Logger(subsystem: "SwamiTool", category: "update")
 
 let volumeURL = URL(fileURLWithPath: "/Volumes/SWAMI")
 let courseURL = URL(string: "http://golftracker.izzo.com/GolfTrackerWeb/file/Course.map")!
@@ -17,7 +20,6 @@ final class Model: NSObject, ObservableObject, URLSessionDownloadDelegate {
     @Published var progress = 0.0
     @Published var status = ""
 
-    private var destination: URL?
     private var timer: Timer?
     private lazy var session = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
 
@@ -43,11 +45,13 @@ final class Model: NSObject, ObservableObject, URLSessionDownloadDelegate {
             status = "Could not write to the SWAMI drive: \(error.localizedDescription)"
             return
         }
-        destination = dest
+        log.notice("start \(url.lastPathComponent, privacy: .public) -> \(dest.path, privacy: .public)")
         busy = true
         progress = 0
         status = "Downloading... please wait"
-        session.downloadTask(with: url).resume()
+        let task = session.downloadTask(with: url)
+        task.taskDescription = dest.path  // read back off the main thread when the download finishes
+        task.resume()
     }
 
     // MARK: URLSessionDownloadDelegate (called off the main thread)
@@ -65,16 +69,60 @@ final class Model: NSObject, ObservableObject, URLSessionDownloadDelegate {
             finish("Download failed: server returned \(http?.statusCode ?? 0)")
             return
         }
-        DispatchQueue.main.sync {
-            guard let dest = self.destination else { return }
-            do {
-                try? FileManager.default.removeItem(at: dest)
-                try FileManager.default.moveItem(at: tmp, to: dest)
-                self.finish("Download completed! Eject SWAMI before unplugging.", ok: true)
-            } catch {
-                try? FileManager.default.removeItem(at: dest)
-                self.finish("Download failed: \(error.localizedDescription)")
+        log.notice("downloaded \(downloadTask.countOfBytesReceived) bytes, http \(http?.statusCode ?? 0), main thread: \(Thread.isMainThread)")
+        guard let path = downloadTask.taskDescription else { return }
+        let dest = URL(fileURLWithPath: path)
+        // Copying onto the USB drive is slow, so do it here (background queue), never on the main thread.
+        Task { @MainActor in
+            self.progress = 0
+            self.status = "Copying to SWAMI... do not unplug"
+        }
+        do {
+            try? FileManager.default.removeItem(at: dest)
+            let t0 = Date()
+            try copy(tmp, to: dest)
+            log.notice("copy to device took \(Date().timeIntervalSince(t0), format: .fixed(precision: 1))s")
+            finish("Download completed! Eject SWAMI before unplugging.", ok: true)
+        } catch {
+            try? FileManager.default.removeItem(at: dest)
+            finish("Download failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Copies in 1 MB chunks, reporting progress, then flushes to the device before returning.
+    nonisolated private func copy(_ src: URL, to dest: URL) throws {
+        let total = (try FileManager.default.attributesOfItem(atPath: src.path)[.size] as? Int64) ?? 0
+        guard FileManager.default.createFile(atPath: dest.path, contents: nil) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        let input = try FileHandle(forReadingFrom: src)
+        let output = try FileHandle(forWritingTo: dest)
+        defer { try? input.close(); try? output.close() }
+
+        let start = Date()
+        var written: Int64 = 0
+        var lastReport = Date.distantPast
+        while let chunk = try input.read(upToCount: 1 << 20), !chunk.isEmpty {
+            try output.write(contentsOf: chunk)
+            written += Int64(chunk.count)
+            let now = Date()
+            if now.timeIntervalSince(lastReport) >= 0.25 {
+                lastReport = now
+                report(written: written, total: total, since: start)
             }
+        }
+        report(written: written, total: total, since: start)
+        // Make sure the data is really on the drive before we say "done".
+        try output.synchronize()
+    }
+
+    nonisolated private func report(written: Int64, total: Int64, since start: Date) {
+        let mb = { (n: Int64) in String(format: "%.1f", Double(n) / 1_048_576) }
+        let rate = Double(written) / 1_048_576 / max(Date().timeIntervalSince(start), 0.001)
+        let message = "Copying to SWAMI... \(mb(written)) of \(mb(total)) MB (\(String(format: "%.1f", rate)) MB/s) - do not unplug"
+        Task { @MainActor in
+            if total > 0 { self.progress = Double(written) / Double(total) }
+            self.status = message
         }
     }
 
@@ -83,6 +131,7 @@ final class Model: NSObject, ObservableObject, URLSessionDownloadDelegate {
     }
 
     nonisolated private func finish(_ message: String, ok: Bool = false) {
+        log.notice("finish ok=\(ok): \(message, privacy: .public)")
         Task { @MainActor in
             self.busy = false
             self.status = message
